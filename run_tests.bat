@@ -27,7 +27,7 @@ for /l %%x in (1, 1, %limit%) do (
     echo Seed: !seed!
 
     REM Run the MarioGame with Agent (use -cp, not -jar)
-    for /f "delims=" %%A in ('java -cp ".;game_engine.jar" game.mario.MarioGame 99999 !seed! 1000 Agent') do (
+    for /f "delims=" %%A in ('java -cp ".;game_engine.jar" game.mario.MarioGame 9999 !seed! 1000 Agent') do (
         set "output=%%A"
     )
 
