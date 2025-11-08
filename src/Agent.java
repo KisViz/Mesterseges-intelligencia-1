@@ -1,4 +1,5 @@
 ///Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.,h378775@stud.u-szeged.hu
+package src;
 
 import java.util.Random;
 
