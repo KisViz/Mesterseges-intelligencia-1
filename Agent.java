@@ -2,6 +2,7 @@
 // A kod nem tartalmaz ekezetes karaktereket a forditasi hibak elkerulese vegett.
 
 import java.util.Random;
+import java.util.PriorityQueue;
 
 import game.mario.Direction;
 import game.mario.MarioGame;
@@ -9,97 +10,92 @@ import game.mario.MarioPlayer;
 import game.mario.utils.MarioState;
 
 /**
- * Az Agent osztaly egy egyszeru reflex ugynokot valosit meg.
- * Donteseit kizarolag a Mario koruli kozvetlen cellak alapjan hozza meg.
- * A dontesek prioritasi sorrendben tortennek:
- * 1. Bonuszok megszerzese (meglepetesblokk)
- * 2. Akadalyok es arkok atugrasa a tulelesert
- * 3. Ermek gyujtese
- * 4. Alapertelmezett haladas jobbra
+ * Az Agent osztaly egy korlatozott "lookahead" ugynokot valosit meg,
+ * amely A* elveket hasznal a legjobb celpont kivalasztasara.
  *
- * Az ugynok a jatek allapotat (state) hasznalja a kornyezo elemek
- * (fal, cso, erme, stb.) erzekelesere es Mario foldon letenek ellenorzesere.
+ * 1. Eloszor futtat egy magas prioritasu tulelesi reflex-ellenorzest (pl. arok/fal ugasa).
+ * 2. Ha nincs kozvetlen veszely, A* alapu celpontkeresest vegez.
+ * 3. Egy PriorityQueue-t hasznal a kozeli ermek es meglepetesek rangsorolasara
+ * a (koltseg / ertek) arany alapjan (f = g / v).
+ * 4. A legjobb (legalacsonyabb f erteku) celpont fele tesz egy lepest.
+ * 5. Ha nincs celpont a latotavon belul, alapertelmezetten jobbra halad.
  */
 public class Agent extends MarioPlayer {
 
+    // A* alapu celpont-tarolo osztaly
+    // Implementalja a Comparable-t, hogy a PriorityQueue hasznalhassa.
+    private class TargetNode implements Comparable<TargetNode> {
+        int x, y;
+        double score; // Az 'f' ertek (koltseg / ertek)
+
+        public TargetNode(int x, int y, double score) {
+            this.x = x;
+            this.y = y;
+            this.score = score;
+        }
+
+        /**
+         * Osszehasonlitas a PriorityQueue szamara.
+         * A kisebb pontszam (jobb arany) elorebb kerul.
+         */
+        @Override
+        public int compareTo(TargetNode other) {
+            if (this.score < other.score) {
+                return -1;
+            }
+            if (this.score > other.score) {
+                return 1;
+            }
+            return 0;
+        }
+    }
+
+    // Milyen tavolsagra nezzen elore az ugynok (oszlopokban)
+    private static final int LOOKAHEAD_DISTANCE = 20;
+
     /**
      * Az ugynok konstruktora.
-     * @param color A jatekos szine (grafikus feluleten)
-     * @param random Az orokolt veletlenszam-generator
-     * @param state A jatek jelenlegi allapota
      */
     public Agent(int color, Random random, MarioState state) {
         super(color, random, state);
     }
 
     /**
-     * Ez a fuggveny hatarozza meg Mario kovetkezo lepeseit.
-     * A dontes egy egyszeru, szabaly-alapu reflex logika menten tortenik.
-     *
-     * @param remainingTime A gondolkodasra maradt ido nanoszekundumban (ebben
-     * az egyszeru ugynokben nincs hasznalva)
-     * @return A valasztott irany (Direction)
+     * A fuggveny, ami kivalasztja a kovetkezo lepest.
      */
     @Override
     public Direction getDirection(long remainingTime) {
 
-        // --- 1. Allapotinformaciok begyujtese ---
-        // Mario pozicioja: i = sor (Y), j = oszlop (X)
-        // A pozicio double, ezert int-re kasztoljuk a palya indexeleshez.
+        // --- 1. Allapotinformaciok ---
         int y = (int) state.mario.i;
         int x = (int) state.mario.j;
-
-        // A palya int[][] tipusu, az elemeket a MarioGame konstansaival hasonlitjuk ossze.
         int[][] map = state.map;
-        boolean onGround = !state.isInAir; // Foldon van, ha nincs a levegoben
+        boolean onGround = !state.isInAir;
 
-        // Palya meretei (a README alapjan)
         int mapHeight = 13;
         int mapWidth = 100;
 
-        // --- 2. Hatar-ellenorzesek (IndexOutOfBounds elkerulese) ---
+        // --- 2. Magas Prioritasu Tulelesi Reflexek ---
+        // Ha kozvetlen veszely van (arok, fal), azonnal reagalunk
+        // es nem keresunk celpontot.
 
-        // Ha elertuk a palya jobb szelet, ne csinaljunk semmit
+        // Hatar-ellenorzes
         if (x + 1 >= mapWidth) {
-            state.apply(null); // Allapot frissitese a keretrendszernek
+            state.apply(null);
             return null;
         }
 
-        // Kozvetlen kornyezo cellak beolvasasa, hatarokat figyelembe veve
         int cellRight = map[y][x + 1];
+        int cellDiagDownRight = (y + 1 < mapHeight) ? map[y + 1][x + 1] : MarioGame.EMPTY;
 
-        int cellAbove = MarioGame.WALL; // Alapertelmezetten fal, ha a palya tetejen vagyunk
-        if (y > 0) {
-            cellAbove = map[y - 1][x];
-        }
-
-        int cellDiagDownRight = MarioGame.EMPTY; // Alapertelmezetten ures (arok), ha a palya aljan vagyunk
-        if (y + 1 < mapHeight) {
-            cellDiagDownRight = map[y + 1][x + 1];
-        }
-
-
-        // --- 3. Priorizalt Reflex Szabalyok ---
-
-        // 1. PRIORITAS: Meglepetes blokk megszerzese (500 pont)
-        // Ha a foldon allunk es egy '?' van felettunk, ugorjunk.
-        if (onGround && cellAbove == MarioGame.SURPRISE) {
-            Direction action = new Direction(MarioGame.UP);
-            state.apply(action);
-            return action;
-        }
-
-        // 2. PRIORITAS: Tuleles (Akadalyok es Arkok)
         if (onGround) {
-            // Ha jobbra fal vagy cso van, ugorjunk.
+            // Fal vagy cso elottunk
             if (cellRight == MarioGame.WALL || cellRight == MarioGame.PIPE) {
                 Direction action = new Direction(MarioGame.UP);
                 state.apply(action);
                 return action;
             }
-
-            // Ha jobbra elottunk a fold hianyzik (arok), ugorjunk.
-            // (Csak akkor, ha a jobbra levo cella is ures, kulonben falnak ugrunk)
+            // Arok elottunk
             if (cellDiagDownRight == MarioGame.EMPTY && cellRight == MarioGame.EMPTY) {
                 Direction action = new Direction(MarioGame.UP);
                 state.apply(action);
@@ -107,25 +103,104 @@ public class Agent extends MarioPlayer {
             }
         }
 
-        // 3. PRIORITAS: Ermek gyujtese (100 pont)
-        // Ha jobbra erme van, menjunk erte.
-        if (cellRight == MarioGame.COIN) {
-            Direction action = new Direction(MarioGame.RIGHT);
-            state.apply(action);
-            return action;
+        // --- 3. A* Celpont Kereses (Lookahead) ---
+        // Ha nincs kozvetlen veszely, keressuk a legjobb celpontot.
+
+        PriorityQueue<TargetNode> targets = findBestTargets(x, y, map, mapHeight, mapWidth);
+
+        Direction action;
+
+        if (targets.isEmpty()) {
+            // Nincs celpont a kozelben, haladjunk jobbra
+            action = new Direction(MarioGame.RIGHT);
+        } else {
+            // Kivalasztjuk a legjobb celpontot (legalacsonyabb "koltseg/pont" arany)
+            TargetNode bestTarget = targets.poll();
+
+            // Eldontjuk, merre lepjunk a celpont fele
+            action = getMoveTowardsTarget(bestTarget, x, y, onGround);
         }
 
-        // Ha felettunk van erme es a foldon vagyunk, ugorjunk erte.
-        if (onGround && cellAbove == MarioGame.COIN) {
-            Direction action = new Direction(MarioGame.UP);
-            state.apply(action);
-            return action;
-        }
-
-        // 4. PRIORITAS: Alapertelmezett akcio (Haladas)
-        // Ha semmi mas nem indokolt, haladjunk jobbra.
-        Direction action = new Direction(MarioGame.RIGHT);
+        // A lepest vegul alkalmazzuk es visszaadjak
         state.apply(action);
         return action;
+    }
+
+    /**
+     * Megkeresi a kozeli celpontokat es egy "f" ertek alapjan
+     * (koltseg/ertek) PriorityQueue-be rendezi oket.
+     *
+     * @param x Mario jelenlegi X pozicioja
+     * @param y Mario jelenlegi Y pozicioja
+     * @param map A palya
+     * @param mapHeight Palya magassaga
+     * @param mapWidth Palya szelessege
+     * @return Egy prioritasi sor, ami a legjobb celpontokat tartalmazza elol.
+     */
+    private PriorityQueue<TargetNode> findBestTargets(int x, int y, int[][] map, int mapHeight, int mapWidth) {
+        PriorityQueue<TargetNode> pq = new PriorityQueue<TargetNode>();
+
+        // Csak egy limitalt "dobozt" vizsgalunk Mario elott
+        int scanUntilX = Math.min(x + LOOKAHEAD_DISTANCE, mapWidth);
+
+        for (int i = 0; i < mapHeight; i++) {
+            for (int j = x; j < scanUntilX; j++) {
+
+                int item = map[i][j];
+                double value = 0;
+
+                if (item == MarioGame.COIN) {
+                    value = 100.0; //
+                } else if (item == MarioGame.SURPRISE) {
+                    value = 500.0; //
+                }
+
+                if (value > 0) {
+                    // 'g' (koltseg) = Manhattan-tavolsag.
+                    // +1, hogy elkeruljuk a 0-val valo osztast, ha rajta allunk.
+                    int g = Math.abs(x - j) + Math.abs(y - i) + 1;
+
+                    // 'f' = g / v (koltseg / ertek arany)
+                    // Azert negaljuk, mert a SURPRISE-t (ami felettunk van)
+                    // alacsonyabb Y-on erjuk el (pl. y-1), de az ugras koltseges.
+                    // Ez egy egyszerusitett heurisztika.
+                    // A fenti SURPRISE blokkokat preferaljuk.
+                    if (item == MarioGame.SURPRISE && i < y) {
+                        // Ha felettunk van a surprise, csokkentjuk a "koltseget"
+                        // (noveljuk a prioritasat)
+                        g = g / 2;
+                    }
+
+                    double f_score = (double) g / value;
+                    pq.add(new TargetNode(j, i, f_score));
+                }
+            }
+        }
+        return pq;
+    }
+
+    /**
+     * Egy egyszeru irany-valaszto, ami a celpont fele probal lepni.
+     */
+    private Direction getMoveTowardsTarget(TargetNode target, int x, int y, boolean onGround) {
+
+        // 1. Ha a celpont felettunk van (pl. erme, surprise) es foldon vagyunk, ugorjunk.
+        if (target.y < y && onGround) {
+            return new Direction(MarioGame.UP);
+        }
+
+        // 2. Ha a celpont jobbra van, menjunk jobbra.
+        if (target.x > x) {
+            return new Direction(MarioGame.RIGHT);
+        }
+
+        // 3. Ha a celpont balra van, menjunk balra.
+        if (target.x < x) {
+            return new Direction(MarioGame.LEFT);
+        }
+
+        // 4. Ha a celpont velunk egy oszlopban van (de nem felettunk),
+        // vagy barmi mas eset, haladjunk jobbra.
+        return new Direction(MarioGame.RIGHT);
     }
 }
