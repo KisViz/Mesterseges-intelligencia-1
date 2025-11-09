@@ -1,2 +1,4 @@
 gameplay_*.data
 code
+# javac -cp game_engine.jar Agent.java
+#java -jar game_engine.jar 60 game.mario.MarioGame 1234567890 1000 Agent
